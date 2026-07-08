@@ -130,3 +130,42 @@ vllm serve /group-volume/.dataset-0af49006-85e2-3498-9b25-f78df9e3d8b4/datasets/
   --dtype bfloat16 \
   --max-model-len 32768
 ```
+
+
+
+Dockerfile
+```
+# Dockerfile
+FROM vllm/vllm-openai:v0.17.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install CUDA 12.9 forward-compat libraries.
+# This installs /usr/local/cuda-12.9/compat/libcuda.so* etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cuda-compat-12-9 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Force vLLM/PyTorch to use CUDA 12.9 compat user-space libs.
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
+ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda-12.9/compat
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:${LD_LIBRARY_PATH}
+
+# vLLM 0.17.0 supports Qwen3.5, but your working setup needed transformers 4.57.6.
+# Do not let this change torch/vLLM deps.
+RUN python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+    "transformers==4.57.6"
+
+# Optional verification during build.
+RUN python3 - <<'PY'
+import os, torch, transformers, vllm
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("vllm:", vllm.__version__)
+print("transformers:", transformers.__version__)
+print("compat path:", os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH"))
+PY
+
+ENTRYPOINT ["vllm", "serve"]
+```
