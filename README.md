@@ -194,3 +194,18 @@ apt-get update && apt-get install -y \
     nvidia-utils-535 \
     && rm -rf /var/lib/apt/lists/*
 ```
+
+
+```
+unset VK_ICD_FILENAMES
+
+dpkg --remove --force-remove-reinstreq nvidia-utils-535 || true
+apt-get purge -y nvidia-utils-535 || true
+dpkg --configure -a || true
+apt-get -f install -y || true
+
+cat /usr/share/vulkan/icd.d/nvidia_icd.json
+find /usr -name 'libGLX_nvidia.so*' 2>/dev/null
+find /usr -name 'libnvidia-glvkspirv.so*' 2>/dev/null
+find /usr -name 'libnvidia-vulkan*.so*' 2>/dev/null
+```
