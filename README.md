@@ -186,3 +186,11 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     && rm -rf /var/lib/apt/lists/*
 ```
+
+
+```
+apt-get update && apt-get install -y \
+    libnvidia-gl-535 \
+    nvidia-utils-535 \
+    && rm -rf /var/lib/apt/lists/*
+```
