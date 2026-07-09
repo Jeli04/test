@@ -169,3 +169,20 @@ PY
 
 ENTRYPOINT ["vllm", "serve"]
 ```
+
+
+```
+RUN apt-get update && apt-get install -y \
+    vulkan-tools \
+    libvulkan1 \
+    libgl1 \
+    libglib2.0-0 \
+    libx11-6 \
+    libxrandr2 \
+    libxcursor1 \
+    libxi6 \
+    libxinerama1 \
+    libxss1 \
+    libxtst6 \
+    && rm -rf /var/lib/apt/lists/*
+```
