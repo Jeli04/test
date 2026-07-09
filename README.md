@@ -208,4 +208,10 @@ cat /usr/share/vulkan/icd.d/nvidia_icd.json
 find /usr -name 'libGLX_nvidia.so*' 2>/dev/null
 find /usr -name 'libnvidia-glvkspirv.so*' 2>/dev/null
 find /usr -name 'libnvidia-vulkan*.so*' 2>/dev/null
+
+VK_LOADER_DEBUG=all \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+vulkaninfo --summary 2>&1 | tee /tmp/vulkan_debug.txt
+
+grep -iE "error|failed|cannot|nvidia|incompatible" /tmp/vulkan_debug.txt | head -100
 ```
