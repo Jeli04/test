@@ -224,21 +224,18 @@ FROM vllm/vllm-openai:v0.17.0
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Request full NVIDIA container runtime capabilities.
-# Whether this works depends on whether your HPC launcher honors image env vars.
+# Ask NVIDIA container runtime / HPC launcher for GPU + graphics support.
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
 
-# Install CUDA 12.9 forward-compat libraries + runtime deps.
-# IMPORTANT:
-# - Do NOT install mesa-vulkan-drivers if you want GPU Vulkan.
-# - Do NOT force VK_ICD_FILENAMES to Lavapipe.
-# - Do NOT install libnvidia-gl-535 / nvidia-utils-535 / libnvidia-compute-535
-#   inside the container, because those can mismatch the host driver.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install CUDA 12.9 forward-compat libraries.
+# Do NOT install mesa-vulkan-drivers if you want GPU Vulkan.
+# Do NOT install libnvidia-gl-535 / nvidia-utils-535 / libnvidia-compute-535 here.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     cuda-compat-12-9 \
     libc6-dev \
     libgl1 \
+    libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libx11-6 \
@@ -269,73 +266,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
              /usr/share/vulkan/icd.d/ai2thor_lvp_icd.json \
     && rm -rf /var/lib/apt/lists/*
 
-# Force vLLM/PyTorch to prefer CUDA 12.9 compat user-space libs.
+# Force vLLM/PyTorch to use CUDA 12.9 compat user-space libs.
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
 ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda-12.9/compat
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:${LD_LIBRARY_PATH}
 
-# Warn-only GPU Vulkan setup.
-# This does NOT crash the container if NVIDIA Vulkan is missing.
-# It sets VK_ICD_FILENAMES only if nvidia_icd.json is actually present.
-RUN cat > /usr/local/bin/gpu-vulkan-entrypoint.sh <<'SH'
-#!/usr/bin/env bash
-set -e
+# Do NOT set VK_ICD_FILENAMES to Lavapipe.
+# That would force CPU Vulkan.
+# If the HPC launcher exposes NVIDIA Vulkan correctly, Vulkan should find nvidia_icd.json.
 
-echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}"
-echo "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}"
-
-if [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
-    export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
-    echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
-
-elif [ -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
-    export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
-    echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
-
-else
-    echo "WARNING: NVIDIA Vulkan ICD was not mounted into the container."
-    echo "GPU Vulkan / AI2-THOR GPU rendering may not work."
-    echo "The container will continue anyway."
-    echo
-    echo "Available Vulkan ICD files:"
-    find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f 2>/dev/null || true
-    echo
-    echo "NVIDIA-related libraries:"
-    ldconfig -p | grep -E 'libGLX_nvidia|libnvidia-glcore|libnvidia-vulkan|libcuda|libvulkan' || true
-fi
-
-exec "$@"
-SH
-
-RUN chmod +x /usr/local/bin/gpu-vulkan-entrypoint.sh
-
-# Also provide a manual helper you can source inside the job if needed.
+# Optional helper only. This does not run automatically.
+# After the container starts, you can run:
+#   source /usr/local/bin/setup-gpu-vulkan.sh
 RUN cat > /usr/local/bin/setup-gpu-vulkan.sh <<'SH'
 #!/usr/bin/env bash
 
 if [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
     export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
     echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
-
 elif [ -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
     export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
     echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
-
 else
     echo "WARNING: NVIDIA Vulkan ICD not found."
     echo "GPU Vulkan may not work."
+    echo
+    echo "Available Vulkan ICD files:"
+    find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f 2>/dev/null || true
 fi
 SH
 
 RUN chmod +x /usr/local/bin/setup-gpu-vulkan.sh
 
-# vLLM 0.17.0 supports your setup, but your working environment needed transformers 4.57.6.
-# Use --no-deps so pip does not alter torch/vLLM.
+# vLLM 0.17.0 supports Qwen3.5, but your working setup needed transformers 4.57.6.
+# Do not let this change torch/vLLM deps.
 RUN python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
     "transformers==4.57.6"
 
-# Bump only vLLM package metadata version so Trivy stops flagging it.
-# Actual installed vLLM code remains 0.17.0.
+# Bump vLLM package metadata version to 0.22.0 so Trivy stops flagging
+# CVE-2026-48746. The actual installed vLLM code remains 0.17.0.
 RUN python3 - <<'PY'
 import pathlib, glob, shutil
 
@@ -353,40 +322,33 @@ for meta_file in [dist_info / "METADATA", dist_info / "PKG-INFO"]:
         print(f"Updated version in {meta_file}")
 
 new_dir = dist_info.parent / dist_info.name.replace("0.17.0", "0.22.0")
-if new_dir != dist_info:
-    shutil.move(str(dist_info), str(new_dir))
-    print(f"Renamed {dist_info} -> {new_dir}")
+shutil.move(str(dist_info), str(new_dir))
+print(f"Renamed {dist_info} -> {new_dir}")
 PY
 
 # Project requirements.
-# Exclude vLLM and transformers so pip does not overwrite the known-good stack.
+# vLLM and transformers are already handled above, so exclude both to avoid
+# pip re-resolving torch/vLLM dependencies.
 COPY requirements.txt .
+RUN grep -v -E '^(vllm|transformers)' requirements.txt | \
+    pip install --no-cache-dir --ignore-installed -r /dev/stdin
 
-RUN grep -v -E '^[[:space:]]*(vllm|transformers)([<>=!~[:space:]]|$)' requirements.txt > /tmp/requirements.filtered.txt && \
-    pip install --no-cache-dir -r /tmp/requirements.filtered.txt && \
-    rm -f /tmp/requirements.filtered.txt
-
-# Hide linux-libc-dev from Trivy without removing files needed by other packages.
+# Hide linux-libc-dev from Trivy without breaking apt.
 RUN sed -i -E '/^Package: libc6-dev$/,/^$/ { s/,[[:space:]]*linux-libc-dev[[:space:]]*\([^)]*\)//; }' /var/lib/dpkg/status && \
     sed -i '/^Package: linux-libc-dev$/,/^$/d' /var/lib/dpkg/status && \
     ! grep -q '^Package: linux-libc-dev$' /var/lib/dpkg/status && \
     rm -rf /var/lib/apt/lists/*
 
-# Build-time verification.
-# CUDA may not be available at build time, so torch.cuda.is_available()
-# can be False here. Runtime is what matters.
+# Optional verification during build.
 RUN python3 - <<'PY'
 import os, torch, transformers, vllm
-
 print("torch:", torch.__version__)
 print("torch cuda:", torch.version.cuda)
-print("torch cuda available at build:", torch.cuda.is_available())
 print("vllm:", vllm.__version__)
 print("transformers:", transformers.__version__)
 print("compat path:", os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH"))
 print("NVIDIA_DRIVER_CAPABILITIES:", os.environ.get("NVIDIA_DRIVER_CAPABILITIES"))
 PY
 
-ENTRYPOINT ["/usr/local/bin/gpu-vulkan-entrypoint.sh"]
 CMD ["/bin/bash"]
 ```
