@@ -225,12 +225,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 # Ask NVIDIA container runtime / HPC launcher for GPU + graphics support.
+# This only works if the HPC launcher honors image env vars.
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
 
-# Install CUDA 12.9 forward-compat libraries.
-# Do NOT install mesa-vulkan-drivers if you want GPU Vulkan.
-# Do NOT install libnvidia-gl-535 / nvidia-utils-535 / libnvidia-compute-535 here.
+# Install CUDA 12.9 forward-compat libraries + AI2-THOR/Vulkan deps.
+# IMPORTANT:
+# - Keep mesa-vulkan-drivers installed as CPU fallback.
+# - Do NOT set VK_ICD_FILENAMES to Lavapipe globally.
+# - Do NOT install libnvidia-gl-535 / nvidia-utils-535 / libnvidia-compute-535 here.
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     cuda-compat-12-9 \
     libc6-dev \
@@ -250,6 +253,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     libgomp1 \
     xvfb \
     libvulkan1 \
+    mesa-vulkan-drivers \
     vulkan-tools \
     wget \
     git \
@@ -258,26 +262,53 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     nano \
     curl \
     less \
-    && apt-get purge -y mesa-vulkan-drivers || true \
-    && rm -f /usr/share/vulkan/icd.d/lvp_icd*.json \
-             /usr/share/vulkan/icd.d/intel*.json \
-             /usr/share/vulkan/icd.d/radeon*.json \
-             /usr/share/vulkan/icd.d/virtio*.json \
-             /usr/share/vulkan/icd.d/ai2thor_lvp_icd.json \
     && rm -rf /var/lib/apt/lists/*
+
+# Optional: normalize the Mesa Lavapipe ICD filename as a fallback.
+# This does NOT force AI2-THOR to use Lavapipe unless VK_ICD_FILENAMES points to it.
+RUN set -e && \
+    LVP_ICD=$(dpkg -L mesa-vulkan-drivers 2>/dev/null | grep -E 'lvp_icd.*\.json$' | head -1) && \
+    if [ -n "$LVP_ICD" ]; then \
+        mkdir -p /usr/share/vulkan/icd.d && \
+        ln -sf "$LVP_ICD" /usr/share/vulkan/icd.d/ai2thor_lvp_icd.json; \
+    fi
 
 # Force vLLM/PyTorch to use CUDA 12.9 compat user-space libs.
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
 ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda-12.9/compat
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:${LD_LIBRARY_PATH}
 
-# Do NOT set VK_ICD_FILENAMES to Lavapipe.
-# That would force CPU Vulkan.
-# If the HPC launcher exposes NVIDIA Vulkan correctly, Vulkan should find nvidia_icd.json.
+# Runtime Vulkan selector.
+# If NVIDIA Vulkan is mounted by the HPC launcher, use it.
+# If not, do NOT crash; continue and let Vulkan fall back to whatever is available.
+RUN cat > /usr/local/bin/gpu-vulkan-entrypoint.sh <<'SH'
+#!/usr/bin/env bash
+set -e
 
-# Optional helper only. This does not run automatically.
-# After the container starts, you can run:
-#   source /usr/local/bin/setup-gpu-vulkan.sh
+echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}"
+echo "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}"
+
+if [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ]; then
+    export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+    echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
+
+elif [ -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
+    export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+    echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
+
+else
+    echo "WARNING: NVIDIA Vulkan ICD was not found."
+    echo "GPU Vulkan may not be available. Container will continue."
+    echo "Available Vulkan ICD files:"
+    find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f 2>/dev/null || true
+fi
+
+exec "$@"
+SH
+
+RUN chmod +x /usr/local/bin/gpu-vulkan-entrypoint.sh
+
+# Manual helper too, in case you ever start without the ENTRYPOINT.
 RUN cat > /usr/local/bin/setup-gpu-vulkan.sh <<'SH'
 #!/usr/bin/env bash
 
@@ -289,17 +320,14 @@ elif [ -f /etc/vulkan/icd.d/nvidia_icd.json ]; then
     echo "Using NVIDIA Vulkan ICD: ${VK_ICD_FILENAMES}"
 else
     echo "WARNING: NVIDIA Vulkan ICD not found."
-    echo "GPU Vulkan may not work."
-    echo
-    echo "Available Vulkan ICD files:"
-    find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f 2>/dev/null || true
+    echo "Vulkan may fall back to Mesa/Lavapipe CPU."
 fi
 SH
 
 RUN chmod +x /usr/local/bin/setup-gpu-vulkan.sh
 
 # vLLM 0.17.0 supports Qwen3.5, but your working setup needed transformers 4.57.6.
-# Do not let this change torch/vLLM deps.
+# Keep this exactly like before.
 RUN python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
     "transformers==4.57.6"
 
@@ -327,8 +355,7 @@ print(f"Renamed {dist_info} -> {new_dir}")
 PY
 
 # Project requirements.
-# vLLM and transformers are already handled above, so exclude both to avoid
-# pip re-resolving torch/vLLM dependencies.
+# Keep this exactly like your original working Dockerfile.
 COPY requirements.txt .
 RUN grep -v -E '^(vllm|transformers)' requirements.txt | \
     pip install --no-cache-dir --ignore-installed -r /dev/stdin
@@ -350,5 +377,6 @@ print("compat path:", os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH"))
 print("NVIDIA_DRIVER_CAPABILITIES:", os.environ.get("NVIDIA_DRIVER_CAPABILITIES"))
 PY
 
+ENTRYPOINT ["/usr/local/bin/gpu-vulkan-entrypoint.sh"]
 CMD ["/bin/bash"]
 ```
