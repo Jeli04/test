@@ -223,19 +223,17 @@ FROM vllm/vllm-openai:v0.17.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-
-# Ask NVIDIA container runtime to expose all GPU capabilities.
-# This only works if the HPC launcher honors these env vars.
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # Install CUDA 12.9 forward-compat libraries.
-# Do NOT install libnvidia-gl-535 / nvidia-utils-535 / libnvidia-compute-535 here.
-# Those caused host/container driver mismatch.
+# This installs /usr/local/cuda-12.9/compat/libcuda.so* etc.
+# Do NOT install libnvidia-gl-535 / nvidia-utils-535 here.
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     cuda-compat-12-9 \
     libc6-dev \
     libgl1 \
+    libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libx11-6 \
@@ -258,12 +256,6 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     nano \
     curl \
     less \
-    && apt-get purge -y mesa-vulkan-drivers || true \
-    && rm -f /usr/share/vulkan/icd.d/lvp_icd*.json \
-             /usr/share/vulkan/icd.d/intel*.json \
-             /usr/share/vulkan/icd.d/radeon*.json \
-             /usr/share/vulkan/icd.d/virtio*.json \
-             /usr/share/vulkan/icd.d/ai2thor_lvp_icd.json \
     && rm -rf /var/lib/apt/lists/*
 
 # Force vLLM/PyTorch to use CUDA 12.9 compat user-space libs.
@@ -271,11 +263,12 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=1
 ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda-12.9/compat
 ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:${LD_LIBRARY_PATH}
 
-# Do NOT set VK_ICD_FILENAMES to Lavapipe.
-# The NVIDIA container runtime/HPC launcher should inject nvidia_icd.json.
-# If it does not, GPU Vulkan rendering will not work.
+# Important:
+# Do NOT set VK_ICD_FILENAMES to Lavapipe/llvmpipe.
+# The HPC/NVIDIA container runtime should inject nvidia_icd.json at runtime.
 
 # vLLM 0.17.0 supports Qwen3.5, but your working setup needed transformers 4.57.6.
+# Do not let this change torch/vLLM deps.
 RUN python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
     "transformers==4.57.6"
 
@@ -284,6 +277,7 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
 RUN python3 - <<'PY'
 import pathlib, glob, shutil
 
+# Find vLLM's dist-info directory
 matches = glob.glob("/usr/local/lib/python3.*/dist-packages/vllm-*.dist-info")
 if not matches:
     raise SystemExit("ERROR: vllm dist-info not found")
@@ -297,6 +291,7 @@ for meta_file in [dist_info / "METADATA", dist_info / "PKG-INFO"]:
         meta_file.write_text(text)
         print(f"Updated version in {meta_file}")
 
+# Rename the dist-info directory itself to match
 new_dir = dist_info.parent / dist_info.name.replace("0.17.0", "0.22.0")
 shutil.move(str(dist_info), str(new_dir))
 print(f"Renamed {dist_info} -> {new_dir}")
